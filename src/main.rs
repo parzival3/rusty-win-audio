@@ -1,6 +1,13 @@
 use windows::core::Interface;
 use windows::core::GUID;
-use windows::Win32::UI::Shell::PropertiesSystem::PropVariantToStringAlloc;
+use windows::Win32::UI::Shell::PropertiesSystem::{
+    PropVariantToStringAlloc,
+    PSStringFromPropertyKey,
+    PSGetNameFromPropertyKey,
+    IPropertyDescription,
+    PSGetPropertyDescription
+};
+
 use windows::core::PWSTR;
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
@@ -9,11 +16,11 @@ use windows::Win32::System::Com::StructuredStorage::STGM_READ;
 use windows::Win32::{
     Media::Audio::{
         eAll, eCapture, eConsole, eMultimedia, eRender, ConnectorType, EDataFlow,
-        IAudioSessionManager2, IConnector, IDeviceTopology, IMMDevice, IMMDeviceEnumerator,
+        IConnector, IDeviceTopology, IMMDevice, IMMDeviceEnumerator,
         IMMEndpoint, IPart, IPartsList, MMDeviceEnumerator, PartType
     },
     System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, CLSCTX_INPROC_SERVER,
+        CoCreateInstance, CoInitializeEx, CLSCTX_ALL, CLSCTX_INPROC_SERVER,
         COINIT_APARTMENTTHREADED,
     },
 };
@@ -55,6 +62,18 @@ unsafe fn pwstr_to_string(string: PWSTR) -> String {
     return string_id;
 }
 
+unsafe fn u16_to_string(string: [u16; 200]) -> String {
+    let mut end = 0;
+    while string[end] != 0 {
+        end = end + 1;
+    }
+    let string_id = String::from_utf16_lossy(std::slice::from_raw_parts(
+        &string[0],
+        end
+    ));
+    return string_id;
+}
+
 struct audio_node_t {
     state: u32,
     data_flow: EDataFlow,
@@ -87,8 +106,9 @@ unsafe fn retrieve_node_details(audio_node: &audio_node_t) {
         .node
         .GetName()
         .expect("Couldn't retrieve the name of the node");
+
     println!(
-        "retrieve_node_details: node_name is '{}'",
+        "Node '{}' has:",
         pwstr_to_string(node_name)
     );
     let global_id = audio_node
@@ -96,20 +116,20 @@ unsafe fn retrieve_node_details(audio_node: &audio_node_t) {
         .GetGlobalId()
         .expect("Couldn't retrieve the global id of the node");
     println!(
-        "retrieve_node_details: global id of node is '{}'",
+        "\t Global ID: '{}'",
         pwstr_to_string(global_id)
     );
     let local_id = audio_node
         .node
         .GetLocalId()
         .expect("Couldn't retrieve the local id of the node");
-    println!("retrieve_node_details: local id of node is '{}'", local_id);
+    println!("\t Local ID: '{}'", local_id);
     let sub_type = audio_node
         .node
         .GetSubType()
         .expect("Couldn't retrieve the subtype of the node");
     println!(
-        "retrieve_node_details: local id of node is '{}'",
+        "\t SubType: '{}'",
         sub_type.to_u128()
     );
     let part_type = audio_node
@@ -117,16 +137,25 @@ unsafe fn retrieve_node_details(audio_node: &audio_node_t) {
         .GetPartType()
         .expect("Couldn't retrieve the part type");
     println!(
-        "retrieve_node_details: part type is  '{}'",
+        "\t PartType is '{}'",
         part_type_to_string(part_type)
     );
+
+
+    println!("Node '{}' has the following interfaces: ", pwstr_to_string(node_name));
+    let count_interfaces = audio_node.node.GetControlInterfaceCount().expect("Couldn't get the number of interfaces");
+    for int_index in 0..count_interfaces {
+        let interface = audio_node.node.GetControlInterface(int_index).expect("Couldn't get interface at index");
+        let interface_id = interface.GetIID().expect("Couldn't get IID for interface");
+        let interface_name = interface.GetName().expect("Couldn't get the name of the interface");
+        println!("\t '{}' with guid {}", pwstr_to_string(interface_name), interface_id.to_u128());
+    }
 }
 
 unsafe fn enumerate_nodes(audio_node: &audio_node_t, is_last_node: bool) {
     retrieve_node_details(audio_node);
 
     if is_last_node {
-        println!("Incounter the last node !!!!!!");
         return;
     }
 
@@ -145,19 +174,22 @@ unsafe fn enumerate_nodes(audio_node: &audio_node_t, is_last_node: bool) {
     let number_of_parts = part_list
         .GetCount()
         .expect("Couldn't get the number of parts of the PartList");
-    println!("This is the number of parts {}", number_of_parts);
+    println!("\t The total number of of parts is {}", number_of_parts);
 
     for part_indx in 0..number_of_parts {
         let child_node: IPart = part_list
             .GetPart(part_indx)
             .expect("Couldn't get the part indx from part_list");
+        let child_name = child_node.GetName().expect("Coudlnt' get the name of the child");
         let node_type = child_node
             .GetPartType()
             .expect("Child node couldn't get part type");
+
         println!(
-            "This is the child part type '{}'",
-            part_type_to_string(node_type)
-        );
+            "\t Child '{} has:",
+            pwstr_to_string(child_name));
+
+        println!("\t\t PartType: '{}'", part_type_to_string(node_type));
 
         let last_node = match node_type {
          ::windows::Win32::Media::Audio::Connector => true,
@@ -171,7 +203,7 @@ unsafe fn enumerate_nodes(audio_node: &audio_node_t, is_last_node: bool) {
                 .GetType()
                 .expect("Couldn't get the type of the last node");
             println!(
-                "This is the connector type '{}'",
+                "\t We reached the last node with ConnectorType '{}'",
                 connector_type_to_string(connector_type)
             );
         }
@@ -231,6 +263,35 @@ unsafe fn create_device_topology(imm_device: &IMMDevice) {
         state_to_string(state).expect("Couldn't convert state to string")
     );
 
+
+    println!("The following are the properties of the current IMMDevice");
+    let property_store : IPropertyStore = imm_device.OpenPropertyStore(STGM_READ).expect("Couldn't open property store");
+    let count : u32 = property_store.GetCount().expect("Couldn't get the number of properties");
+    for p_indx in 0..count {
+        let prop = property_store.GetAt(p_indx).expect("Couldn't open property at index");
+        let mut the_string : [u16; 200] = [0; 200];
+        PSStringFromPropertyKey(&prop, &mut the_string).expect("Couldn't get the string for this property key");
+        let value = property_store.GetValue(&prop).expect("Couldn't get the value at index");
+        let pwstr_value = PropVariantToStringAlloc(&value).expect("Couldn't convert to PWSTR");
+        let string_value = pwstr_to_string(pwstr_value);
+        let name = PSGetNameFromPropertyKey(&prop);
+        let string_name  = match name {
+            Ok(pwstr_name) => pwstr_to_string(pwstr_name),
+            Err(_) => String::new()
+        };
+
+        println!("\t Property '{}': '{}' GUIID '{}'", string_name, string_value, u16_to_string(the_string));
+        let mut pinterface: *mut std::ffi::c_void = std::ptr::null_mut();
+        let res = PSGetPropertyDescription(&prop,&IPropertyDescription::IID, &mut pinterface as *mut _);
+        match res {
+            Ok(_) =>  {
+                let property_description = std::mem::transmute::<*mut std::ffi::c_void, IPropertyDescription>(pinterface);
+            },
+            Err(_) => println!("This property doesn't have a description")
+        }
+
+    }
+
     for con_index in 0..connector_count {
         let connector: IConnector = audio_topology_ref
             .GetConnector(con_index)
@@ -245,7 +306,6 @@ unsafe fn create_device_topology(imm_device: &IMMDevice) {
 }
 
 fn main() {
-    println!("Hello world!!!");
     unsafe {
         CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED).expect("CoInitializeEx Failed");
 
@@ -262,11 +322,6 @@ fn main() {
             .GetCount()
             .expect("Failed to get the number of endpoints");
 
-        println!(
-            "This are the number of endpoint present in the PC {}",
-            number_of_endpoints
-        );
-
         // Endpoint enumeration
         for endpoint_indx in 0..number_of_endpoints {
             let imm_device : IMMDevice = endpoints
@@ -276,62 +331,14 @@ fn main() {
                 .GetId()
                 .expect("Thre was a problem retriving the endpoint id");
 
-            let mut end = endpoint_id.0;
-            while *end != 0 {
-                end = end.add(1);
-            }
-            let string_id = String::from_utf16_lossy(std::slice::from_raw_parts(
-                endpoint_id.0,
-                end.offset_from(endpoint_id.0) as _,
-            ));
-
-            let property_store : IPropertyStore = imm_device.OpenPropertyStore(STGM_READ).expect("Couldn't open property store");
-            let count : u32 = property_store.GetCount().expect("Couldn't get the number of properties");
-            for p_indx in 0..count {
-                let prop = property_store.GetAt(p_indx).expect("Couldn't open property at index");
-                let value = property_store.GetValue(&prop).expect("Couldn't get the value at index");
-                let pwstr_value = PropVariantToStringAlloc(&value).expect("Couldn't convert to PWSTR");
-                let string_value = pwstr_to_string(pwstr_value);
-                println!("This is the value {}", string_value);
-            }
+            println!("This is the endpoint id '{}'", pwstr_to_string(endpoint_id));
 
             CoTaskMemFree(endpoint_id.0 as _);
 
-            println!("This is the endpoint id '{}'", string_id);
-
             create_device_topology(&imm_device);
+
+            println!(" ==================================================================================== ");
         }
 
-        // Getting the IMMDevice of the defaultAudioEndpoint: works
-        let endpoint = imm_device_enumerator
-            .GetDefaultAudioEndpoint(eRender, eConsole)
-            .expect("GetDefaultAudioEnpoint Failed");
-
-        // Activating: the target Interface is IAudioSessionManager2: No error!
-        let endpoint_id = endpoint
-            .GetId()
-            .expect("Thre was a problem retriving the endpoint id");
-
-        let mut end = endpoint_id.0;
-        while *end != 0 {
-            end = end.add(1);
-        }
-        let string_id = String::from_utf16_lossy(std::slice::from_raw_parts(
-            endpoint_id.0,
-            end.offset_from(endpoint_id.0) as _,
-        ));
-
-        CoTaskMemFree(endpoint_id.0 as _);
-
-        println!("This is the endpoint id '{}'", string_id);
-
-        let state = endpoint
-            .GetState()
-            .expect("Thre was a problem retreiving the enpoint state!");
-
-        println!(
-            "This is the state of the current endpoint '{}'",
-            state_to_string(state).expect("Couldn't convert state to string")
-        );
     }
 }
