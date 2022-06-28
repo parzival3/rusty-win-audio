@@ -1,13 +1,16 @@
 use windows::core::Interface;
 use windows::core::GUID;
+use windows::Win32::UI::Shell::PropertiesSystem::PropVariantToStringAlloc;
 use windows::core::PWSTR;
 use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
+use windows::Win32::System::Com::StructuredStorage::STGM_READ;
 
 use windows::Win32::{
     Media::Audio::{
         eAll, eCapture, eConsole, eMultimedia, eRender, ConnectorType, EDataFlow,
         IAudioSessionManager2, IConnector, IDeviceTopology, IMMDevice, IMMDeviceEnumerator,
-        IMMEndpoint, IPart, IPartsList, MMDeviceEnumerator, PartType,
+        IMMEndpoint, IPart, IPartsList, MMDeviceEnumerator, PartType
     },
     System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, CLSCTX_INPROC_SERVER,
@@ -177,7 +180,7 @@ unsafe fn enumerate_nodes(audio_node: &audio_node_t, is_last_node: bool) {
             state: audio_node.state,
             data_flow: audio_node.data_flow,
             node: child_node,
-            connector_type: connector_type,
+            connector_type,
         };
 
         enumerate_nodes(&next_audio_node, last_node);
@@ -194,10 +197,10 @@ unsafe fn create_audio_node(state: u32, data_flow: EDataFlow, connector: &IConne
         let connected_interface: IPart = connected_to.cast().unwrap();
 
         return audio_node_t {
-            state: state,
-            data_flow: data_flow,
+            state,
+            data_flow,
             node: connected_interface,
-            connector_type: connector_type,
+            connector_type,
         };
 }
 
@@ -266,7 +269,7 @@ fn main() {
 
         // Endpoint enumeration
         for endpoint_indx in 0..number_of_endpoints {
-            let imm_device = endpoints
+            let imm_device : IMMDevice = endpoints
                 .Item(endpoint_indx)
                 .expect("Failed to get the item from the collection of endpoints");
             let endpoint_id = imm_device
@@ -281,6 +284,16 @@ fn main() {
                 endpoint_id.0,
                 end.offset_from(endpoint_id.0) as _,
             ));
+
+            let property_store : IPropertyStore = imm_device.OpenPropertyStore(STGM_READ).expect("Couldn't open property store");
+            let count : u32 = property_store.GetCount().expect("Couldn't get the number of properties");
+            for p_indx in 0..count {
+                let prop = property_store.GetAt(p_indx).expect("Couldn't open property at index");
+                let value = property_store.GetValue(&prop).expect("Couldn't get the value at index");
+                let pwstr_value = PropVariantToStringAlloc(&value).expect("Couldn't convert to PWSTR");
+                let string_value = pwstr_to_string(pwstr_value);
+                println!("This is the value {}", string_value);
+            }
 
             CoTaskMemFree(endpoint_id.0 as _);
 
